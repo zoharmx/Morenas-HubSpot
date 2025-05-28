@@ -71,3 +71,24 @@ def consultar_envio(guia: str):
         return {"error": "No se encontró un envío con esa guía."}
     else:
         return {"error": f"Error en HubSpot: {response.status_code} - {response.text}"}
+
+from fastapi import Request
+import json, datetime
+
+@app.post("/webhook")
+async def webhook_hubspot(req: Request):
+    payload = await req.json()
+    with open("webhook_log.json", "a") as f:
+        json.dump({"ts": str(datetime.datetime.now()),
+                   "data": payload}, f)
+        f.write("\n")
+    print("webhook received", payload)
+    return {"status": "ok"}
+
+@app.get("/ver-webhooks")
+async def ver_webhooks():
+    try:
+        with open("webhook_log.json") as f:
+            return {"events": [json.loads(l) for l in f]}
+    except FileNotFoundError:
+        return {"events": []}
