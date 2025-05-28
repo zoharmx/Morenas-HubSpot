@@ -1,2 +1,8 @@
-.env
+# Python
+*.pyc
 __pycache__/
+.env
+
+# Otros
+Public/
+respaldo/
