@@ -1,33 +1,45 @@
-import os
-import requests
-from fastapi import FastAPI
+"""
+Morenas-HubSpot API
+-------------------
+•  Endpoint  GET /consultar-envio?guia=...      →  consulta un contacto en HubSpot por Nº de guía
+•  Endpoint POST /webhook                       →  recibe eventos de HubSpot (webhooks)
+•  Endpoint GET  /ver-webhooks                  →  lista los eventos recibidos
+•  Endpoint GET  /                              →  health-check para Render
+"""
+
+import os, json, datetime, hmac, hashlib, requests
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
+# ---------- Cargar variables de entorno ----------
 load_dotenv()
+HUBSPOT_API_KEY   = os.getenv("HUBSPOT_API_KEY")      # Token privado (PAT)
+HUBSPOT_SECRET    = os.getenv("HUBSPOT_SECRET")       # Client Secret (para firmar webhooks) – opcional
+HUBSPOT_SEARCH_URL = "https://api.hubapi.com/crm/v3/objects/contacts/search"
 
-app = FastAPI()
+# ---------- Crear app ----------
+app = FastAPI(title="Morenas-HubSpot API", version="1.0.0")
 
-# Configuración de CORS
+# ---------- CORS ----------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Reemplaza "*" con tu dominio si fuera necesario
+    allow_origins=["*"],            # cámbialo por tu dominio en producción
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Carga segura de credenciales desde el archivo .env
-HUBSPOT_API_KEY = os.getenv("HUBSPOT_API_KEY")  # Inserta tu token real en el .env
-HUBSPOT_SECRET = os.getenv("HUBSPOT_SECRET")      # Inserta tu “secreto” si lo requieres
+# ---------- Health check (para Render) ----------
+@app.get("/", tags=["health"])
+async def root():
+    return {"status": "ok"}
 
-HUBSPOT_SEARCH_URL = "https://api.hubapi.com/crm/v3/objects/contacts/search"
-
-@app.get("/consultar-envio")
+# ---------- Consulta de envíos ----------
+@app.get("/consultar-envio", tags=["envios"])
 def consultar_envio(guia: str):
     """
-    Consulta en HubSpot el estado del envío, basado en la propiedad "guia"
-    Retorna las propiedades configuradas en HubSpot.
+    Devuelve las propiedades de un contacto cuyo campo 'guia' coincide con el parámetro.
     """
     headers = {
         "Authorization": f"Bearer {HUBSPOT_API_KEY}",
@@ -41,54 +53,58 @@ def consultar_envio(guia: str):
             ]
         }],
         "properties": [
-            "correo",
-            "nombre",
-            "apellidos",
-            "destino",
-            "estatus",
-            "guia",
-            "numero_de_telefono",
-            "recoleccion",
-            "direccion",
-            "ciudad",
-            "codigo_postal",
-            "medidas",
-            "peso",
-            "direccion_de_entrega",
-            "nombre_de_receptor",
-            "telefono_del_receptor",
-            "total"
+            "correo", "nombre", "apellidos", "destino", "estatus", "guia",
+            "numero_de_telefono", "recoleccion", "direccion", "ciudad", "codigo_postal",
+            "medidas", "peso", "direccion_de_entrega", "nombre_de_receptor",
+            "telefono_del_receptor", "total"
         ]
     }
 
-    response = requests.post(HUBSPOT_SEARCH_URL, json=payload, headers=headers)
+    resp = requests.post(HUBSPOT_SEARCH_URL, json=payload, headers=headers)
+    if resp.status_code != 200:
+        return {"error": f"HubSpot error {resp.status_code}: {resp.text}"}
 
-    if response.status_code == 200:
-        data = response.json()
-        if data.get("results"):
-            contacto = data["results"][0]["properties"]
-            return contacto
+    data = resp.json()
+    if not data.get("results"):
         return {"error": "No se encontró un envío con esa guía."}
-    else:
-        return {"error": f"Error en HubSpot: {response.status_code} - {response.text}"}
 
-from fastapi import Request
-import json, datetime
+    return data["results"][0]["properties"]
 
-@app.post("/webhook")
+# ---------- Recepción de Webhooks ----------
+@app.post("/webhook", tags=["webhooks"])
 async def webhook_hubspot(req: Request):
-    payload = await req.json()
-    with open("webhook_log.json", "a") as f:
-        json.dump({"ts": str(datetime.datetime.now()),
-                   "data": payload}, f)
+    """
+    Recibe eventos de HubSpot.  Guarda cada uno en 'webhook_log.json'.
+    Si HUBSPOT_SECRET está definido, valida la firma HMAC.
+    """
+    body = await req.body()           # bytes
+    if HUBSPOT_SECRET:
+        sig_header = req.headers.get("X-HubSpot-Signature")
+        computed = hmac.new(
+            HUBSPOT_SECRET.encode(),
+            body,
+            hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(sig_header or "", computed):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+    payload = json.loads(body)
+
+    with open("webhook_log.json", "a", encoding="utf-8") as f:
+        json.dump({"ts": str(datetime.datetime.now()), "data": payload}, f, ensure_ascii=False)
         f.write("\n")
-    print("webhook received", payload)
+
+    print("📨 Webhook recibido:", payload)
     return {"status": "ok"}
 
-@app.get("/ver-webhooks")
+# ---------- Visualizar webhooks almacenados ----------
+@app.get("/ver-webhooks", tags=["webhooks"])
 async def ver_webhooks():
+    """
+    Devuelve todos los eventos guardados en 'webhook_log.json'.
+    """
     try:
-        with open("webhook_log.json") as f:
-            return {"events": [json.loads(l) for l in f]}
+        with open("webhook_log.json", encoding="utf-8") as f:
+            return {"events": [json.loads(line) for line in f]}
     except FileNotFoundError:
         return {"events": []}
